@@ -29,7 +29,7 @@ public class ImageDistributor {
 
     public static void main(String[] args) throws Exception {
         // Шаг 1: Загрузка исходного изображения из файла
-        BufferedImage image = ImageIO.read(new File("input.jpg"));
+        BufferedImage image = ImageIO.read(new File("C:\\Users\\Acer\\IdeaProjects\\Image_processor\\src\\image1.jpg"));
         System.out.println("Исходное изображение загружено: " + image.getWidth() + "x" + image.getHeight());
 
         // Вычисляем размеры части (тайла)
