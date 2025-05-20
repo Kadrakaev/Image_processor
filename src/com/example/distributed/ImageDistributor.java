@@ -8,55 +8,57 @@ import java.net.URI;
 import java.net.http.*;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.logging.*;
 
-/**
- * Пример параллельной отправки частей изображения на Python-воркеры.
- */
 public class ImageDistributor {
 
-    // Адреса Python-воркеров, на которые отправляем части.
+    // Логгер для вывода сообщений и ошибок
+    private static final Logger logger = Logger.getLogger(ImageDistributor.class.getName());
+
+    // Список URL Python-воркеров для отправки частей изображения
     private static final List<String> WORKERS = List.of(
             "http://localhost:5000/process",
             "http://localhost:5001/process",
             "http://localhost:5002/process"
     );
 
-    // Количество строк и столбцов для разбиения изображения
+    // Конфигурация: сколько строк и столбцов частей сделать из исходного изображения
     private static final int NUM_ROWS = 2;
     private static final int NUM_COLS = 2;
 
     public static void main(String[] args) throws Exception {
-        // Шаг 1: Загрузка исходного изображения из файла
-        BufferedImage image = ImageIO.read(new File("C:\\Users\\Acer\\IdeaProjects\\Image_processor\\src\\image1.jpg"));
-        System.out.println("Исходное изображение загружено: " + image.getWidth() + "x" + image.getHeight());
+        configureLogger();  // Настраиваем логгер (только в файл)
 
-        // Вычисляем размеры части (тайла)
+        // Загружаем исходное изображение из файла
+        BufferedImage image = ImageIO.read(new File("C:\\Users\\Acer\\IdeaProjects\\Image_processor\\src\\image1.jpg"));
+        logger.info("Исходное изображение загружено: " + image.getWidth() + "x" + image.getHeight());
+
+        // Вычисляем ширину и высоту каждого тайла (части)
         int tileWidth = image.getWidth() / NUM_COLS;
         int tileHeight = image.getHeight() / NUM_ROWS;
 
-        // Создаём пул потоков для параллельной отправки и обработки
+        // Создаём пул потоков для параллельной обработки (каждый тайл — в отдельном потоке)
         ExecutorService executor = Executors.newFixedThreadPool(NUM_ROWS * NUM_COLS);
 
-        // Список для хранения будущих результатов (Future) каждой отправки
+        // Список для хранения Future — результата асинхронной отправки чанков на обработку
         List<Future<BufferedImage>> futures = new ArrayList<>();
 
-        // Переменная для выбора Python-воркера по кругу (round-robin)
-        int workerIndex = 0;
+        int workerIndex = 0;  // Для выбора воркера по кругу (round-robin)
 
-        // Шаг 2: Разбиваем исходное изображение на тайлы и отправляем на обработку
+        // Разбиваем исходное изображение на части и отправляем их на обработку
         for (int y = 0; y < NUM_ROWS; y++) {
             for (int x = 0; x < NUM_COLS; x++) {
-                // Текущие координаты тайла
-                int finalX = x;
+                int finalX = x;  // Нужно для лямбды, чтобы сохранить значение
                 int finalY = y;
 
-                // Выбираем адрес Python-воркера по кругу
+                // Выбираем воркер по кругу из списка
                 String workerUrl = WORKERS.get(workerIndex % WORKERS.size());
                 workerIndex++;
 
-                // Создаём тайл - подизображение
+                // Вырезаем из исходного изображения тайл — часть по координатам и размеру
                 BufferedImage chunk = image.getSubimage(
                         finalX * tileWidth,
                         finalY * tileHeight,
@@ -64,79 +66,131 @@ public class ImageDistributor {
                         tileHeight
                 );
 
-                // Отправляем обработку в отдельном потоке
-                Future<BufferedImage> future = executor.submit(() -> sendChunk(workerUrl, chunk));
-                futures.add(future);
+                // Отправляем тайл на обработку в отдельном потоке с повторными попытками
+                futures.add(executor.submit(() -> {
+                    try {
+                        return sendChunkWithRetry(workerUrl, chunk, 3);
+                    } catch (Exception e) {
+                        logger.severe("Не удалось обработать часть изображения: " + e.getMessage());
+                        throw e;  // Пробрасываем дальше, чтобы Future знал об ошибке
+                    }
+                }));
             }
         }
 
-        // Шаг 3: Создаём пустое итоговое изображение того же размера
-        BufferedImage result = new BufferedImage(
-                image.getWidth(),
-                image.getHeight(),
-                BufferedImage.TYPE_INT_RGB
-        );
+        // Создаём итоговое пустое изображение нужного размера
+        BufferedImage result = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
         Graphics2D g = result.createGraphics();
 
-        // Шаг 4: Получаем результаты из потоков и собираем в итоговое изображение
         int i = 0;
+        // Получаем из Future обработанные части и рисуем их в итоговое изображение
         for (int y = 0; y < NUM_ROWS; y++) {
             for (int x = 0; x < NUM_COLS; x++) {
                 try {
-                    // Получаем обработанный тайл (блокируем, если не готов)
-                    BufferedImage processedChunk = futures.get(i++).get();
-
-                    // Рисуем обработанный тайл в итоговое изображение
-                    g.drawImage(processedChunk, x * tileWidth, y * tileHeight, null);
+                    BufferedImage processedChunk = futures.get(i++).get();  // Блокируем, ждём результат
+                    g.drawImage(processedChunk, x * tileWidth, y * tileHeight, null);  // Рисуем в нужном месте
                 } catch (Exception e) {
-                    e.printStackTrace();
-                    System.err.println("Ошибка при получении обработанного блока.");
+                    logger.severe("Ошибка при получении обработанного блока: " + e.getMessage());
+                    // Можно отрисовать исходный чанк или оставить место пустым
                 }
             }
         }
-        g.dispose();
+        g.dispose();  // Освобождаем ресурсы графики
 
-        // Шаг 5: Сохраняем итоговое изображение в файл
+        // Сохраняем итоговое изображение в файл
         ImageIO.write(result, "jpg", new File("output.jpg"));
-        System.out.println("Обработанное изображение сохранено в output.jpg");
+        logger.info("Обработанное изображение сохранено в output.jpg");
 
-        // Завершаем пул потоков
-        executor.shutdown();
+        executor.shutdown();  // Завершаем пул потоков
     }
 
     /**
-     * Отправляет часть изображения на Python-воркер по HTTP POST,
-     * получает обратно обработанное изображение.
-     *
-     * @param url   Адрес Python-воркера
-     * @param chunk Подизображение (тайл) для обработки
-     * @return Обработанное изображение (BufferedImage)
-     * @throws Exception При ошибках сети или обработки
+     * Отправка чанка с повторными попытками.
+     * maxRetries — максимальное число попыток отправить часть.
+     * При ошибке отправки ждет и увеличивает задержку (экспоненциальная backoff).
+     */
+    private static BufferedImage sendChunkWithRetry(String url, BufferedImage chunk, int maxRetries) throws Exception {
+        int attempt = 0;
+        long delay = 1000; // начальная задержка в миллисекундах (1 секунда)
+        Exception lastException = null;
+
+        while (attempt < maxRetries) {
+            try {
+                return sendChunk(url, chunk);  // Пытаемся отправить и получить результат
+            } catch (IOException e) {
+                attempt++;
+                lastException = e;
+                logger.warning("Попытка " + attempt + " отправки части на " + url + " завершилась ошибкой: " + e.getMessage());
+                if (attempt < maxRetries) {
+                    logger.info("Ждем " + delay + " мс перед повторной попыткой...");
+                    Thread.sleep(delay);  // ждем перед повторной попыткой
+                    delay *= 2;  // увеличиваем задержку в 2 раза (экспоненциально)
+                }
+            }
+        }
+        throw new IOException("Не удалось отправить часть после " + maxRetries + " попыток", lastException);
+    }
+
+    /**
+     * Отправка части изображения (чанка) на Python-воркер.
+     * Конвертирует изображение в JPEG байты, отправляет POST-запрос и читает ответ.
      */
     private static BufferedImage sendChunk(String url, BufferedImage chunk) throws Exception {
-        // Преобразуем BufferedImage в байты JPEG
+        // Конвертируем BufferedImage в байты JPEG
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ImageIO.write(chunk, "jpg", baos);
         byte[] imageBytes = baos.toByteArray();
 
-        // Создаём HTTP клиент (Java 11+)
-        HttpClient client = HttpClient.newHttpClient();
+        // Создаем HTTP клиент с таймаутом подключения
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
 
-        // Формируем POST запрос с бинарными данными изображения
+        // Формируем POST-запрос с содержимым байтов изображения
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("Content-Type", "application/octet-stream")
+                .header("Content-Type", "application/octet-stream")  // бинарные данные
+                .timeout(Duration.ofSeconds(10))  // таймаут ожидания ответа
                 .POST(BodyPublishers.ofByteArray(imageBytes))
                 .build();
 
-        // Отправляем запрос и получаем ответ как InputStream
+        // Отправляем запрос, ожидаем InputStream в ответе
         HttpResponse<InputStream> response = client.send(request, BodyHandlers.ofInputStream());
 
-        // Если ответ успешный (код 200), читаем изображение из потока
+        // Если ответ успешный, читаем изображение из входящего потока
         if (response.statusCode() == 200) {
             return ImageIO.read(response.body());
         } else {
+            // Если ошибка, бросаем исключение с описанием
             throw new IOException("Ошибка от сервера " + url + ": HTTP " + response.statusCode());
         }
     }
+
+    /**
+     * Настройка логгера: вывод всех сообщений только в файл worker.log,
+     * без вывода в консоль.
+     */
+    private static void configureLogger() throws IOException {
+        Logger rootLogger = Logger.getLogger("");
+
+        // Удаляем все существующие обработчики
+        for (Handler handler : rootLogger.getHandlers()) {
+            rootLogger.removeHandler(handler);
+        }
+
+        // Создаем файловый обработчик с ротацией: max 5 Мб, 3 файла бэкапа
+        FileHandler fileHandler = new FileHandler("worker.log", 5 * 1024 * 1024, 3, true);
+        fileHandler.setLevel(Level.ALL);
+
+        // Форматтер для более читаемого лога с датой и временем
+        SimpleFormatter formatter = new SimpleFormatter();
+        fileHandler.setFormatter(formatter);
+
+        // Добавляем файловый обработчик к root логгеру
+        rootLogger.addHandler(fileHandler);
+
+        // Устанавливаем уровень логирования на максимум (чтобы всё логировалось)
+        rootLogger.setLevel(Level.ALL);
+    }
 }
+
