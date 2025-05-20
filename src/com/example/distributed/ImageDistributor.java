@@ -18,9 +18,9 @@ public class ImageDistributor {
 
     // Адреса Python-воркеров, на которые отправляем части.
     private static final List<String> WORKERS = List.of(
-            "http://localhost:5000/process_chunk",
-            "http://localhost:5001/process_chunk",
-            "http://localhost:5002/process_chunk"
+            "http://localhost:5000/process",
+            "http://localhost:5001/process",
+            "http://localhost:5002/process"
     );
 
     // Количество строк и столбцов для разбиения изображения
